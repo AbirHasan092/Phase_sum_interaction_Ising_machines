@@ -1,0 +1,97 @@
+function R=main(datafile,gainHarmonics)
+% Data-driven ideal eight-tap phase-sum/curl analysis. Base MATLAB.
+% Run R=main; from this folder. Original files are never modified.
+if nargin<1, datafile=fullfile(fileparts(mfilename('fullpath')),'..','Diffring_WV_PPV.matlab'); end
+if isempty(datafile), datafile=fullfile(fileparts(mfilename('fullpath')),'..','Diffring_WV_PPV.matlab'); end
+if nargin<2 || isempty(gainHarmonics), gainHarmonics=1; end
+assert(isnumeric(gainHarmonics) && isscalar(gainHarmonics) && ...
+    any(gainHarmonics==[0 1 10]),'gainHarmonics must be 0, 1 or 10.');
+% R=main([],0): DC only (default); R=main([],1) or R=main([],10): AC pump.
+out=fullfile(fileparts(mfilename('fullpath')),'results');
+if ~exist(out,'dir'), mkdir(out); end
+D=readmatrix(datafile,'FileType','text','Delimiter',',','NumHeaderLines',1);
+assert(size(D,2)==4 && all(isfinite(D(:))),'Expected four numeric columns');
+assert(all(diff(D(:,1))>0)&&all(diff(D(:,3))>0),'Times must increase');
+T=D(end,1)-D(1,1); assert(max(abs(D(:,1)-D(:,3)))<1e-6*T,'Time axes differ');
+% Full-cycle interval includes the endpoint. Integrate actual time coordinates.
+u=(D(:,1)-D(1,1))/T; H=floor((size(D,1)-1)/4); h=(-H:H)';
+E=exp(-2i*pi*u*h');
+z=trapz(u,D(:,2).*E,1).'; q=trapz(u,D(:,4).*E,1).';
+cut=-21;
+lz=20*log10(abs(z)/max(abs(z(h~=0))));
+lq=20*log10(abs(q)/max(abs(q(h~=0))));
+z(lz<cut)=0; q(lq<cut)=0;
+% Approximate digitization of supplied |G_n| plot; complex coefficients,
+% NOT cosine amplitudes. Pump at 2*omega, phases zero, DC unspecified -> 0.
+allGainAmplitudes=[.85 .072 .039 .020 .010 .0055 .0030 .0016 .00090 .00048]';
+amp=allGainAmplitudes(1:gainHarmonics);
+Kmax=numel(amp);
+gpos=amp;
+if Kmax==0
+    G0=(max(D(:,4))-min(D(:,4)))/2; % Half original waveform peak-to-peak.
+else
+    G0=0;
+    gpos(20*log10(amp/max(amp))<cut)=0;
+end
+g=[flipud(gpos);G0;gpos];
+N=2^nextpow2(2*H+2); ax=(-N/2:N/2-1)'; [n,m]=ndgrid(ax,ax);
+Z=zeros(N,1); Q=Z; Z(h+N/2+1)=z; Q(h+N/2+1)=q;
+k=-(n+m)/2; valid=mod(n+m,2)==0 & abs(k)<=Kmax;
+G=zeros(N); G(valid)=g(k(valid)+Kmax+1);
+base=(Z*Q.').*G; theta=2*pi*(0:N-1)'/N;
+rows=[]; R=struct; R.T=T; R.cutoff_dBc=cut; R.h=h; R.z=z; R.q=q; R.g=g;
+R.G0=G0;
+R.assumptions='One full cycle; PPV scale unchanged; ideal shifted taps; zero gain phases; DC-only gain is half waveform peak-to-peak, otherwise pump at 2 omega with zero DC';
+for M=2:8
+ target=2*pi*(0:M-1)'/M; offsets=2*pi*(0:7)'/8;
+ dist=abs(angle(exp(1i*(offsets.'-target)))); p=zeros(M,1);
+ for r=1:M
+  [~,ix]=min(dist(:)); [rr,j]=ind2sub(size(dist),ix);
+  p(rr)=j; dist(rr,:)=Inf; dist(:,j)=Inf;
+ end
+ s=p([1 M:-1:2]);
+ for ideal=0:1
+  if ideal, A=double(mod(n-m,M)==0); else
+   A=zeros(N); for r=1:M, A=A+exp(1i*(n*offsets(p(r))+m*offsets(s(r))))/M; end
+  end
+  C=base.*A;
+  % Reverse interaction: swap receiver PRC and transmitter waveform.
+  B=(Q*Z.').*G;
+  if ideal, B=B.*double(mod(n-m,M)==0); else, B=B.*A; end
+  F1=real(ifft2(ifftshift(C))*N^2); F2=real(ifft2(ifftshift(B))*N^2);
+  d1=real(ifft2(ifftshift(1i*m.*C))*N^2);
+  d2=real(ifft2(ifftshift(1i*n.*B))*N^2); curl=d1-d2;
+  rmsC=sqrt(mean(curl(:).^2)); scale=sqrt(mean(d1(:).^2+d2(:).^2));
+  desired=n==m & n~=0; cross=n~=m;
+  pd=sum(abs(C(desired)).^2); pc=sum(abs(C(cross)).^2);
+  rows=[rows;M ideal pc/max(pd+pc,realmin) rmsC max(abs(curl(:))) rmsC/max(scale,eps) scale]; %#ok<AGROW>
+  R.cases(M-1,ideal+1).C=C; R.cases(M-1,ideal+1).F1=F1;
+  R.cases(M-1,ideal+1).F2=F2; R.cases(M-1,ideal+1).curl=curl;
+ end
+end
+R.summary=array2table(rows,'VariableNames',{'M','IdealUniform','CrossPowerFraction','CurlRMS','CurlMax','NormalizedCurl','DerivativeScale'});
+R.theta=theta; R.gainAmplitudes=amp; R.Kmax=Kmax;
+writetable(R.summary,fullfile(out,'sweep_summary.csv'));
+writetable(table(h,abs(q),abs(z),lq,lz),fullfile(out,'harmonics.csv'));
+if Kmax==0
+    gainOrders=0; gainAmplitudes=abs(G0);
+else
+    gainOrders=(1:Kmax)'; gainAmplitudes=abs(gpos);
+end
+gainLevels=20*log10(max(gainAmplitudes,realmin)/max(max(gainAmplitudes),realmin));
+writetable(table(gainOrders,gainAmplitudes,gainLevels),fullfile(out,'gain_harmonics.csv'));
+save(fullfile(out,'phase_sum_results.mat'),'R');
+f=pipeline_figure('main','Color','w'); tiledlayout(2,2);
+nexttile; stem(h(h>0),lq(h>0),'BaseValue',-120); hold on; stem(h(h>0),lz(h>0),'BaseValue',-120); yline(cut,'--'); ylim([-120 5]); xlabel('Harmonic'); ylabel('dBc'); legend('Waveform','PPV');
+nexttile; stem(gainOrders,gainAmplitudes); xlabel('Pump harmonic k (0 = DC)'); ylabel('|G_k|');
+nexttile; plot(2:8,rows(1:2:end,6),'o-',2:8,rows(2:2:end,6),'s-'); xlabel('Paths M'); ylabel('Normalized RMS curl'); legend('Eight physical-model taps','Ideal uniform');
+nexttile; imagesc(theta,theta,R.cases(7,1).curl); axis xy; colorbar; xlabel('theta_2'); ylabel('theta_1'); title('M=8 curl');
+exportgraphics(f,fullfile(out,'comparison.png'),'Resolution',180); disp(R.summary);
+plot_interaction_spectrum(R,8,out);
+plot_time_domain(datafile,out);
+plot_signal_harmonics(R,out);
+plot_gain_spectrum(R,out);
+plot_curl_scale(R,out);
+plot_absolute_harmonics(R,out);
+end
+
