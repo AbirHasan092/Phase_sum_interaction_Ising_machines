@@ -2,11 +2,6 @@
 
 This README describes only the MATLAB scripts associated with the plots in Figures 1 and 2 of the paper preview at `D:\Abir\Curl-analysis\Latex\view.pdf`.
 
-All analysis scripts listed below are located in:
-
-```text
-D:\Abir\Hopf\New folder (2)\Plots\New folder
-```
 
 Use these nested files, since same-named copies elsewhere in the folder have different parameters. The scripts generate the numerical plots; the complete paper figures, including schematics, equation tables, and captions, are assembled separately.
 
